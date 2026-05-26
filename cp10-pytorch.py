@@ -51,6 +51,47 @@ def _(X):
 
 
 @app.cell
+def _(torch):
+    import timeit
+
+    device = "mps"
+
+    M = torch.rand((5000, 5000))
+    print(timeit.timeit("M @ M.T", globals=globals(), number=10))
+
+    M = torch.rand((5000, 5000), device=device)
+    print(timeit.timeit("M @ M.T", globals=globals(), number=10))
+
+    return
+
+
+@app.cell
+def _(torch):
+    x = torch.tensor(5.0, requires_grad=True)
+    lr = 0.1
+
+    for iteration in range(100):
+        f = x ** 2
+        f.backward()
+        with torch.no_grad():
+            x -= lr * x.grad
+
+        x.grad.zero_()
+
+        print(x)
+    return
+
+
+@app.cell
+def _(torch):
+    t = torch.tensor(2.0, requires_grad=True)
+    z = t.exp()
+    z = z + 1
+    z.backward()
+    return
+
+
+@app.cell
 def _():
     return
 
