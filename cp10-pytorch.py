@@ -133,7 +133,7 @@ def _(housing, torch, train_test_split):
     y_train = torch.FloatTensor(y_train).reshape(-1, 1)
     y_valid = torch.FloatTensor(y_valid).reshape(-1, 1)
     y_test = torch.FloatTensor(y_test).reshape(-1, 1)
-    return X_test, X_train, y_train
+    return X_test, X_train, X_valid, y_train, y_valid
 
 
 @app.cell
@@ -159,7 +159,7 @@ def _(X_train, torch, y_train):
             b.grad.zero_()
             w.grad.zero_()
         print(f"Epoch {epoch + 1} / {n_epoches}, Loss: {loss.item()}")
-    return b, lr, n_epoches, n_features, w
+    return b, lr, n_epoches, n_features, w, y_pred
 
 
 @app.cell
@@ -242,12 +242,15 @@ def _(MLP_model, MLP_opt, X_train, mse, n_epoches, y_train):
 
 
 @app.cell
-def _(X_train, y_train):
+def _(X_train, device, y_train):
     from torch.utils.data import TensorDataset, DataLoader
 
-    train_dataset = TensorDataset(X_train, y_train)
+    GPU_X_train = X_train.to(device)
+    GPU_y_train = y_train.to(device)
+
+    train_dataset = TensorDataset(GPU_X_train, GPU_y_train)
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    return (train_loader,)
+    return DataLoader, TensorDataset, train_loader
 
 
 @app.cell
@@ -268,34 +271,110 @@ def _(MLP_lr, device, n_features, nn, torch):
     return GPU_MLP_model, GPU_MLP_opt
 
 
-@app.cell
-def _(device):
-    # Mini-batch GD
+@app.function
+# Mini-batch GD
 
-    def train(model, optimizer, criterion, train_loader, n_epoches):
-        model.train()
-        for epoch in range(n_epoches):
-            total_loss = 0.
-            for X_batch, y_batch in train_loader:
+def train(model, optimizer, criterion, train_loader, n_epoches):
+    model.train()
+    for epoch in range(n_epoches):
+        total_loss = 0.
+        for X_batch, y_batch in train_loader:
+            # X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            y_pred = model(X_batch)
+
+            loss = criterion(y_pred, y_batch)
+            total_loss += loss.detach()
+
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+        # mean_loss = total_loss / len(train_loader)
+        mean_loss = (total_loss / len(train_loader)).item()
+        print(f"Epoch {epoch + 1}/{n_epoches}, Loss: {mean_loss:.4f}")
+
+
+@app.cell
+def _(GPU_MLP_model, GPU_MLP_opt, mse, train_loader):
+    train(GPU_MLP_model, GPU_MLP_opt, mse, train_loader, 20)
+    return
+
+
+@app.cell
+def _(device, torch):
+    # Model eval
+
+    def evaluate(model, data_loader, metric_fn, aggregate_fn=torch.mean):
+        model.eval()
+        metrics = []
+        with torch.no_grad():
+            for X_batch, y_batch in data_loader:
                 X_batch, y_batch = X_batch.to(device), y_batch.to(device)
                 y_pred = model(X_batch)
+                metric = metric_fn(y_pred, y_batch)
+                metrics.append(metric)
 
-                loss = criterion(y_pred, y_batch)
-                total_loss += loss.item()
+        return aggregate_fn(torch.stack(metrics))
 
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-
-            mean_loss = total_loss / len(train_loader)
-            print(f"Epoch {epoch + 1}/{n_epoches}, Loss: {mean_loss:.4f}")
-
-    return (train,)
+    return (evaluate,)
 
 
 @app.cell
-def _(GPU_MLP_model, GPU_MLP_opt, mse, train, train_loader):
-    train(GPU_MLP_model, GPU_MLP_opt, mse, train_loader, 20)
+def _(
+    DataLoader,
+    GPU_MLP_model,
+    TensorDataset,
+    X_valid,
+    evaluate,
+    mse,
+    y_valid,
+):
+    valid_dataset = TensorDataset(X_valid, y_valid)
+    valid_loader = DataLoader(valid_dataset, batch_size=32)
+    valid_mse = evaluate(GPU_MLP_model, valid_loader, mse)
+    return valid_loader, valid_mse
+
+
+@app.cell
+def _(valid_mse):
+    valid_mse
+    return
+
+
+@app.cell
+def _(device, torch):
+    import torchmetrics
+
+    def evaluate_tm(model, data_loader, metric):
+        model.eval()
+        metric.reset()
+        with torch.no_grad():
+            for X_batch, y_batch in data_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                y_pred = model(X_batch)
+                metric.update(y_pred, y_batch)
+        return metric.compute()
+
+    return evaluate_tm, torchmetrics
+
+
+@app.cell
+def _(device, torchmetrics):
+    rmse = torchmetrics.MeanSquaredError(squared=False).to(device)
+    return (rmse,)
+
+
+@app.cell
+def _(GPU_MLP_model, evaluate_tm, rmse, valid_loader):
+    evaluate_tm(GPU_MLP_model, valid_loader, rmse)
+    return
+
+
+@app.cell
+def _(GPU_MLP_model, X_train, device, y_pred):
+    print(GPU_MLP_model(X_train[:5].to(device)))
+
+    print(y_pred[:5])
     return
 
 
