@@ -62,7 +62,7 @@ def _(torch):
     M = torch.rand((5000, 5000), device=device)
     print(timeit.timeit("M @ M.T", globals=globals(), number=10))
 
-    return
+    return (device,)
 
 
 @app.cell
@@ -182,7 +182,7 @@ def _(lr, n_features, torch):
     model = nn.Linear(in_features=n_features, out_features=1)
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
     mse = nn.MSELoss()
-    return model, mse, optimizer
+    return model, mse, nn, optimizer
 
 
 @app.function
@@ -211,6 +211,91 @@ def _(X_test, model, torch):
         _y_pred = model(_X_new)
 
     print(_y_pred)
+    return
+
+
+@app.cell
+def _(n_features, nn, torch):
+    torch.manual_seed(42)
+
+    MLP_model = nn.Sequential(
+        nn.Linear(n_features, 50),
+        nn.ReLU(),
+        nn.Linear(50, 40),
+        nn.ReLU(),
+        nn.Linear(40, 1)
+    )
+    return (MLP_model,)
+
+
+@app.cell
+def _(MLP_model, torch):
+    MLP_lr = 0.01
+    MLP_opt = torch.optim.SGD(MLP_model.parameters(), lr=MLP_lr)
+    return MLP_lr, MLP_opt
+
+
+@app.cell
+def _(MLP_model, MLP_opt, X_train, mse, n_epoches, y_train):
+    train_bgd(MLP_model, MLP_opt, mse, X_train, y_train, n_epoches)
+    return
+
+
+@app.cell
+def _(X_train, y_train):
+    from torch.utils.data import TensorDataset, DataLoader
+
+    train_dataset = TensorDataset(X_train, y_train)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    return (train_loader,)
+
+
+@app.cell
+def _(MLP_lr, device, n_features, nn, torch):
+    torch.manual_seed(42)
+
+    GPU_MLP_model = nn.Sequential(
+        nn.Linear(n_features, 50),
+        nn.ReLU(),
+        nn.Linear(50, 40),
+        nn.ReLU(),
+        nn.Linear(40, 1)
+    )
+
+    GPU_MLP_model = GPU_MLP_model.to(device)
+
+    GPU_MLP_opt = torch.optim.SGD(GPU_MLP_model.parameters(), lr=MLP_lr)
+    return GPU_MLP_model, GPU_MLP_opt
+
+
+@app.cell
+def _(device):
+    # Mini-batch GD
+
+    def train(model, optimizer, criterion, train_loader, n_epoches):
+        model.train()
+        for epoch in range(n_epoches):
+            total_loss = 0.
+            for X_batch, y_batch in train_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                y_pred = model(X_batch)
+
+                loss = criterion(y_pred, y_batch)
+                total_loss += loss.item()
+
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+
+            mean_loss = total_loss / len(train_loader)
+            print(f"Epoch {epoch + 1}/{n_epoches}, Loss: {mean_loss:.4f}")
+
+    return (train,)
+
+
+@app.cell
+def _(GPU_MLP_model, GPU_MLP_opt, mse, train, train_loader):
+    train(GPU_MLP_model, GPU_MLP_opt, mse, train_loader, 20)
     return
 
 
