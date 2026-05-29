@@ -61,7 +61,6 @@ def _(torch):
 
     M = torch.rand((5000, 5000), device=device)
     print(timeit.timeit("M @ M.T", globals=globals(), number=10))
-
     return (device,)
 
 
@@ -133,7 +132,7 @@ def _(housing, torch, train_test_split):
     y_train = torch.FloatTensor(y_train).reshape(-1, 1)
     y_valid = torch.FloatTensor(y_valid).reshape(-1, 1)
     y_test = torch.FloatTensor(y_test).reshape(-1, 1)
-    return X_test, X_train, X_valid, y_train, y_valid
+    return X_test, X_train, X_valid, y_test, y_train, y_valid
 
 
 @app.cell
@@ -375,6 +374,247 @@ def _(GPU_MLP_model, X_train, device, y_pred):
     print(GPU_MLP_model(X_train[:5].to(device)))
 
     print(y_pred[:5])
+    return
+
+
+@app.cell
+def _(nn, torch):
+    # Non-sequential model (Wild & Deep)
+
+    class WideAndDeep(nn.Module):
+
+        def __init__(self, n_features):
+            super().__init__()
+
+            self.deep_stack = nn.Sequential(
+                nn.Linear(n_features, 50),
+                nn.ReLU(),
+                nn.Linear(50, 40),
+                nn.ReLU(),
+            )
+            self.output_layer = nn.Linear(40 + n_features, 1)
+
+        def forward(self, X):
+            deep_output = self.deep_stack(X)
+            wide_and_deep = torch.concat([X, deep_output], dim=1)
+            return self.output_layer(wide_and_deep)
+
+    return (WideAndDeep,)
+
+
+@app.cell
+def _(WideAndDeep, device, n_features, torch):
+    torch.manual_seed(42)
+    WAD_model = WideAndDeep(n_features).to(device)
+    WAD_lr = 0.002
+    WAD_opt = torch.optim.SGD(WAD_model.parameters(), lr=WAD_lr)
+    return WAD_model, WAD_opt
+
+
+@app.cell
+def _(WAD_model, WAD_opt, mse, train_loader):
+    train(WAD_model, WAD_opt, mse, train_loader, 25)
+    return
+
+
+@app.cell
+def _(nn, torch):
+    class WideAndDeepV4(nn.Module):
+        def __init__(self, n_features):
+            super().__init__()
+            self.deep_stack = nn.Sequential(
+                nn.Linear(n_features - 2, 50),
+                nn.ReLU(),
+                nn.Linear(50, 40),
+                nn.ReLU(),
+                nn.Linear(40, 30),
+                nn.ReLU(),
+            )
+            self.output_layer = nn.Linear(30 + 5, 1)
+            self.aux_output_layer = nn.Linear(30, 1)
+
+        def forward(self, X_wide, X_deep):
+            deep_output = self.deep_stack(X_deep)
+            wide_and_deep = torch.concat([X_wide, deep_output], dim=1)
+            main_output = self.output_layer(wide_and_deep)
+            aux_output = self.aux_output_layer(deep_output)
+            return main_output, aux_output
+
+    return (WideAndDeepV4,)
+
+
+@app.cell
+def _(torch):
+    class WideAndDeepDataset(torch.utils.data.Dataset):
+        def __init__(self, X_wide, X_deep, y):
+            self.X_wide = X_wide
+            self.X_deep = X_deep
+            self.y = y
+
+        def __len__(self):
+            return len(self.y)
+
+        def __getitem__(self, idx):
+            input_dict = {"X_wide": self.X_wide[idx], "X_deep": self.X_deep[idx]}
+            return input_dict, self.y[idx]
+
+    return (WideAndDeepDataset,)
+
+
+@app.cell
+def _(
+    DataLoader,
+    WideAndDeepDataset,
+    X_test,
+    X_train,
+    X_valid,
+    y_test,
+    y_train,
+    y_valid,
+):
+    train_data_named = WideAndDeepDataset(
+        X_wide=X_train[:, :5], X_deep=X_train[:, 2:], y=y_train)
+    train_loader_named = DataLoader(train_data_named, batch_size=32, shuffle=True)
+
+    valid_data_named = WideAndDeepDataset(
+        X_wide=X_valid[:, :5], X_deep=X_valid[:, 2:], y=y_valid)
+    valid_loader_named = DataLoader(valid_data_named, batch_size=32)
+
+    test_data_named = WideAndDeepDataset(
+        X_wide=X_test[:, :5], X_deep=X_test[:, 2:], y=y_test)
+    test_loader_named = DataLoader(test_data_named, batch_size=32)
+    return train_loader_named, valid_loader_named
+
+
+@app.cell
+def _(
+    WideAndDeepV4,
+    device,
+    mse,
+    n_features,
+    rmse,
+    torch,
+    train_loader_named,
+    valid_loader_named,
+):
+    def evaluate_multi_out(model, data_loader, metric):
+        model.eval()
+        metric.reset()
+        with torch.no_grad():
+            for inputs, y_batch in data_loader:
+                inputs = {name: X.to(device) for name, X in inputs.items()}
+                y_batch = y_batch.to(device)
+                y_pred, _ = model(**inputs)
+                metric.update(y_pred, y_batch)
+        return metric.compute()
+
+    def train_multi_out(model, optimizer, criterion, metric, train_loader,
+                       valid_loader, n_epochs):
+        history = {"train_losses": [], "train_metrics": [], "valid_metrics": []}
+        for epoch in range(n_epochs):
+            total_loss = 0.
+            metric.reset()
+            for inputs, y_batch in train_loader:
+                model.train()
+                inputs = {name: X.to(device) for name, X in inputs.items()}
+                y_batch = y_batch.to(device)
+                y_pred, y_pred_aux = model(**inputs)
+                main_loss = criterion(y_pred, y_batch)
+                aux_loss = criterion(y_pred_aux, y_batch)
+                loss = 0.8 * main_loss + 0.2 * aux_loss
+                total_loss += loss.item()
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                metric.update(y_pred, y_batch)
+            mean_loss = total_loss / len(train_loader)
+            history["train_losses"].append(mean_loss)
+            history["train_metrics"].append(metric.compute().item())
+            history["valid_metrics"].append(
+                evaluate_multi_out(model, valid_loader, metric).item())
+            print(f"Epoch {epoch + 1}/{n_epochs}, "
+                  f"train loss: {history['train_losses'][-1]:.4f}, "
+                  f"train metric: {history['train_metrics'][-1]:.4f}, "
+                  f"valid metric: {history['valid_metrics'][-1]:.4f}")
+        return history
+
+    torch.manual_seed(42)
+    WAD4_lr = 0.01
+    WAD4_model = WideAndDeepV4(n_features).to(device)
+    WAD4_opt = torch.optim.SGD(WAD4_model.parameters(), lr=WAD4_lr, momentum=0)
+    history = train_multi_out(WAD4_model, WAD4_opt, mse, rmse, train_loader_named, valid_loader_named, 20)
+    return
+
+
+@app.cell
+def _(torch):
+    ### Image classifer for Fashion MNIST
+
+    # Load the dataset
+
+    import numpy
+    import torchvision
+    import torchvision.transforms.v2 as T
+
+    toTensor = T.Compose([T.ToImage(), T.ToDtype(torch.float32, scale=True)])
+
+    train_and_valid_data = torchvision.datasets.FashionMNIST(
+        root="datasets", train=True, download=True, transform=toTensor
+    )
+    test_data = torchvision.datasets.FashionMNIST(
+        root="datasets", train=False, download=True, transform=toTensor
+    )
+
+    torch.manual_seed(42)
+    train_data, valid_data = torch.utils.data.random_split(
+        train_and_valid_data, [55000, 5000]
+    )
+    return test_data, train_data, valid_data
+
+
+@app.cell
+def _(DataLoader, test_data, train_data, valid_data):
+    # Data loader
+
+    fashion_train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
+    fashion_valid_loader = DataLoader(valid_data, batch_size=32)
+    fashion_test_loader = DataLoader(test_data, batch_size=32)
+    return
+
+
+@app.cell
+def _(train_data):
+    fashion_X_sample, fashion_y_sample = train_data[0]
+    return
+
+
+@app.cell
+def _(nn):
+    # Build the classifer
+
+    class ImageClassifier(nn.Module):
+        def __init__(self, n_inputs, n_hidden1, n_hidden2, n_classes):
+            super().__init__()
+            self.mlp = nn.Sequential(
+                nn.Flatten(),
+                nn.Linear(n_inputs, n_hidden1),
+                nn.ReLU(),
+                nn.Linear(n_hidden1, n_hidden2),
+                nn.ReLU(),
+                nn.Linear(n_hidden2, n_classes)
+            )
+
+        def forward(self, X):
+            return self.mlp(X)
+
+    return (ImageClassifier,)
+
+
+@app.cell
+def _(ImageClassifier, nn, torch):
+    torch.manual_seed(42)
+    class_model = ImageClassifier(n_inputs=28 * 28, n_hidden1=300, n_hidden2=100, n_classes=10)
+    xentropy = nn.CrossEntropyLoss()
     return
 
 
