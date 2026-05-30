@@ -158,7 +158,7 @@ def _(X_train, torch, y_train):
             b.grad.zero_()
             w.grad.zero_()
         print(f"Epoch {epoch + 1} / {n_epoches}, Loss: {loss.item()}")
-    return b, lr, n_epoches, n_features, w, y_pred
+    return b, epoch, lr, n_epoches, n_features, w, y_pred
 
 
 @app.cell
@@ -569,7 +569,7 @@ def _(torch):
     train_data, valid_data = torch.utils.data.random_split(
         train_and_valid_data, [55000, 5000]
     )
-    return test_data, train_data, valid_data
+    return test_data, train_and_valid_data, train_data, valid_data
 
 
 @app.cell
@@ -579,7 +579,7 @@ def _(DataLoader, test_data, train_data, valid_data):
     fashion_train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
     fashion_valid_loader = DataLoader(valid_data, batch_size=32)
     fashion_test_loader = DataLoader(test_data, batch_size=32)
-    return
+    return fashion_train_loader, fashion_valid_loader
 
 
 @app.cell
@@ -611,10 +611,220 @@ def _(nn):
 
 
 @app.cell
-def _(ImageClassifier, nn, torch):
+def _(device, evaluate_tm):
+    def train2(model, optimizer, criterion, metric, train_loader, valid_loader, n_epochs):
+        history = {"train_losses": [], "train_metrics": [], "valid_metrics": []}
+
+        for epoch in range(n_epochs):
+            total_loss = 0.
+            metric.reset()
+
+            for X_batch, y_batch in train_loader:
+                model.train()
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                y_pred = model(X_batch)
+                loss = criterion(y_pred, y_batch)
+                total_loss += loss.item()
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                metric.update(y_pred, y_batch)
+
+            mean_loss = total_loss / len(train_loader)
+            history["train_losses"].append(mean_loss)
+            history["train_metrics"].append(metric.compute().item())
+            history["valid_metrics"].append(evaluate_tm(model, valid_loader, metric).item())
+            print(f"Epoch {epoch + 1}/{n_epochs}, "
+                  f"train loss: {history['train_losses'][-1]:.4f}, "
+                  f"train metric: {history['train_metrics'][-1]:.4f}, "
+                  f"valid metric: {history['valid_metrics'][-1]:.4f}")
+
+        return history
+
+    return (train2,)
+
+
+@app.cell
+def _(ImageClassifier, device, nn, torch):
     torch.manual_seed(42)
-    class_model = ImageClassifier(n_inputs=28 * 28, n_hidden1=300, n_hidden2=100, n_classes=10)
+    class_model = ImageClassifier(n_inputs=28 * 28, n_hidden1=200, n_hidden2=100, n_classes=10).to(device)
     xentropy = nn.CrossEntropyLoss()
+    return class_model, xentropy
+
+
+@app.cell
+def _(
+    class_model,
+    device,
+    fashion_train_loader,
+    fashion_valid_loader,
+    torch,
+    torchmetrics,
+    train2,
+    xentropy,
+):
+    class_opt = torch.optim.SGD(class_model.parameters(), lr=0.05)
+    accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=10).to(device)
+    _ = train2(class_model, class_opt, xentropy, accuracy, fashion_train_loader, fashion_valid_loader, 20)
+    return
+
+
+@app.cell
+def _(device, fashion_valid_loader, model):
+    model.eval()
+    fashion_X_new, fashion_y_new = next(iter(fashion_valid_loader))
+    fashion_X_new = fashion_X_new[:3].to(device)
+    return (fashion_X_new,)
+
+
+@app.cell
+def _(class_model, fashion_X_new, torch):
+    with torch.no_grad():
+        y_pred_logits = class_model(fashion_X_new)
+    return (y_pred_logits,)
+
+
+@app.cell
+def _(y_pred_logits):
+    fashion_y_pred = y_pred_logits.argmax(dim=1)
+    return (fashion_y_pred,)
+
+
+@app.cell
+def _(fashion_y_pred, train_and_valid_data):
+    # fashion_y_pred : [7, 4, 2]
+
+    [train_and_valid_data.classes[index] for index in fashion_y_pred]
+    return
+
+
+@app.cell
+def _(y_pred_logits):
+    import torch.nn.functional as F
+    y_prob = F.softmax(y_pred_logits, dim=1)
+    y_prob.round(decimals=3)
+    return (F,)
+
+
+@app.cell
+def _(F, torch, y_pred_logits):
+    y_top4_logits, y_top4_indices = torch.topk(y_pred_logits, k=4, dim=1)
+    y_top4_probs = F.softmax(y_top4_logits, dim=1)
+    return y_top4_indices, y_top4_probs
+
+
+@app.cell
+def _(y_top4_probs):
+    y_top4_probs.round(decimals=3)
+    return
+
+
+@app.cell
+def _(y_top4_indices):
+    y_top4_indices
+    return
+
+
+@app.cell
+def _(
+    ImageClassifier,
+    device,
+    epoch,
+    fashion_train_loader,
+    fashion_valid_loader,
+    nn,
+    torch,
+    torchmetrics,
+    train2,
+):
+    # Fine-tune NN hyperparameters with Optuna
+
+    import optuna
+
+    def objective(trial):
+        learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-1, log=True)
+        n_hidden = trial.suggest_int("n_hidden", 20, 300)
+        model = ImageClassifier(n_inputs=1 * 28 * 28, n_hidden1=n_hidden, n_hidden2=n_hidden, n_classes=10).to(device)
+        optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+        xentropy = nn.CrossEntropyLoss()
+        accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=10)
+        accuracy = accuracy.to(device)
+        history = train2(model, optimizer, xentropy, accuracy, fashion_train_loader, fashion_valid_loader, n_epochs=10)
+        validation_accuracy = max(history["valid_metrics"])
+    
+        trial.report(validation_accuracy, epoch)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+    
+        return validation_accuracy    
+
+    return objective, optuna
+
+
+@app.cell
+def _(objective, optuna, torch):
+    torch.manual_seed(42)
+    sampler = optuna.samplers.TPESampler(seed=42)
+
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0, interval_steps=1)
+    study = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
+    study.optimize(objective, n_trials=5)
+    return
+
+
+@app.cell
+def _(class_model, torch):
+    torch.save(class_model, "fashion_mnist.pt")
+    return
+
+
+@app.cell
+def _(fashion_X_new, torch):
+    loaded_model = torch.load("fashion_mnist.pt", weights_only=False)
+    loaded_model.eval()
+    loaded_model(fashion_X_new)
+    return
+
+
+@app.cell
+def _(class_model, torch):
+    torch.save(class_model.state_dict(), "fashion_mnist_weights.pt")
+    return
+
+
+@app.cell
+def _():
+    # new_model = ImageClassifier(n_inputs=1 * 28 * 28, n_hidden1=200, n_hidden2=100, n_classes=10).to(device)
+    # loaded_weights = torch.load("fashion_mnist_weights.pt", weights_only=True)
+    # new_model.load_state_dict(loaded_weights)
+    # new_model.eval()
+    # new_model(fashion_X_new)
+    return
+
+
+@app.cell
+def _(class_model, torch):
+    model_data = {
+        "model_state_dict": class_model.state_dict(),
+        "model_hyperparameters": {
+            "n_inputs": 1 * 28 * 28,
+            "n_hidden1": 200,
+            "n_hidden2": 100,
+            "n_classes": 10
+        }
+    }
+
+    torch.save(model_data, "fashion_mnist_model.pt")
+    return
+
+
+@app.cell
+def _(ImageClassifier, device, fashion_X_new, torch):
+    loaded_data = torch.load("fashion_mnist_model.pt", weights_only=True)
+    new_model = ImageClassifier(**loaded_data["model_hyperparameters"]).to(device)
+    new_model.load_state_dict(loaded_data["model_state_dict"])
+    new_model.eval()
+    new_model(fashion_X_new)
     return
 
 
