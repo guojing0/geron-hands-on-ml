@@ -829,7 +829,85 @@ def _(ImageClassifier, device, fashion_X_new, torch):
 
 
 @app.cell
+def _(torch):
+    # Exercise 13
+
+    _x = torch.tensor(1.2, requires_grad=True)
+    _y = torch.tensor(3.4, requires_grad=True)
+
+    fxy = torch.sin(_x**2 * _y)
+    fxy.backward()
+
+    print(fxy)
+    print([_x.grad, _y.grad])
+
+    # tensor(-0.9832, grad_fn=<SinBackward0>)
+    # [tensor(1.4899), tensor(0.2629)]
+    return
+
+
+@app.cell
+def _(nn):
+    # Exercise 14
+
+    class Dense(nn.Module):
+
+        def __init__(self, in_features, out_features):
+            super().__init__()
+            self.linear = nn.Linear(in_features, out_features)
+            self.relu = nn.ReLU()
+
+        def forward(self, X):
+            return self.relu(self.linear(X))
+
+    return (Dense,)
+
+
+@app.cell
+def _(Dense, torch):
+    torch.manual_seed(42)
+    dense = Dense(3, 5)
+    _X = torch.randn(2, 3)
+    _y_pred = dense(_X)
+    _y_pred.shape
+    print(_y_pred)
+    return
+
+
+@app.cell
+def _(F, nn, torch):
+    class Dense2(nn.Module):
+
+        def __init__(self, in_features, out_features):
+            super().__init__()
+            self.weight = nn.Parameter(torch.randn(out_features, in_features))
+            self.bias = nn.Parameter(torch.zeros(out_features))
+
+        def forward(self, X):
+            z = X @ self.weight.T + self.bias
+            return F.relu(z)
+
+    return (Dense2,)
+
+
+@app.cell
+def _(Dense2, F, torch):
+    torch.manual_seed(42)
+    dense2 = Dense2(3, 5)
+    _X = torch.randn(2, 3)
+    y_pred2 = dense2(_X)
+    y_pred2.shape
+
+    y_pred2_check = F.relu(_X @ dense2.weight.T + dense2.bias)
+    torch.allclose(y_pred2, y_pred2_check)
+    return
+
+
+@app.cell
 def _():
+    # Exercise 15
+
+
     return
 
 
